@@ -1,0 +1,59 @@
+local Players = game:GetService("Players")
+local ServerStorage = game:GetService("ServerStorage")
+
+--------------------------------------------------
+-- АДМИНЫ: впиши сюда Roblox UserId тех, кто может использовать команды
+--------------------------------------------------
+local ADMINS = {
+	[123] = true, -- замени на свой UserId
+	-- [987654321] = true,
+}
+
+-- Если игра принадлежит пользователю, владелец тоже получает доступ
+if game.CreatorType == Enum.CreatorType.User then
+	ADMINS[game.CreatorId] = true
+end
+
+local resetFunction = ServerStorage:WaitForChild("ResetPlayerData")
+
+--------------------------------------------------
+-- Команды:
+--   /resetdata            -> сбросить свои данные
+--   /resetdata 123456789  -> сбросить данные игрока по Roblox UserId
+--------------------------------------------------
+local function onChatted(player, msg)
+	local args = string.split(string.lower(msg), " ")
+	if args[1] ~= "/resetdata" then return end
+
+	if not ADMINS[player.UserId] then
+		warn(player.Name, "пытался использовать /resetdata без прав")
+		return
+	end
+
+	local targetId = player.UserId
+	if args[2] then
+		targetId = tonumber(args[2])
+		if not targetId then
+			warn("[AdminCommands] Неверный UserId:", args[2])
+			return
+		end
+	end
+
+	local ok, info = resetFunction:Invoke(targetId)
+	if ok then
+		print(("[Reset] %s сбросил данные %d (%s)"):format(player.Name, targetId, info))
+	else
+		warn(("[Reset] Не удалось сбросить %d: %s"):format(targetId, tostring(info)))
+	end
+end
+
+local function onPlayerAdded(player)
+	player.Chatted:Connect(function(msg)
+		onChatted(player, msg)
+	end)
+end
+
+Players.PlayerAdded:Connect(onPlayerAdded)
+for _, p in ipairs(Players:GetPlayers()) do
+	task.spawn(onPlayerAdded, p)
+end
