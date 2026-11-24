@@ -1,0 +1,150 @@
+-- ServerScriptService → BaseAssignment
+
+local Players = game:GetService("Players")
+
+-- Настройки
+local BASES_FOLDER = workspace -- если базы лежат прямо в Workspace
+local BASE_PREFIX = "base"     -- base1, base2 ... base6
+local MAX_BASES = 6
+
+-- Таблица занятых баз: [baseName] = player
+local occupiedBases = {}
+
+-- Функция получения свободной базы
+local function getFreeBase()
+	for i = 1, MAX_BASES do
+		local baseName = BASE_PREFIX .. i
+		local base = BASES_FOLDER:FindFirstChild(baseName)
+
+		if base and not occupiedBases[baseName] then
+			return base, baseName
+		end
+	end
+	return nil, nil
+end
+
+-- Обновление BillboardGui на базе
+local function updateBaseBillboard(base, player)
+	local avatar = base:FindFirstChild("Avatar")
+	if not avatar then
+		warn("У базы", base.Name, "нет объекта Avatar")
+		return
+	end
+
+	local billboard = avatar:FindFirstChildOfClass("BillboardGui")
+	if not billboard then
+		warn("У Avatar нет BillboardGui")
+		return
+	end
+
+	local imageLabel = billboard:FindFirstChild("ImageLabel") -- или как у тебя называется
+	local textLabel = billboard:FindFirstChild("TextLabel")   -- или как у тебя называется
+
+	if textLabel then
+		textLabel.Text = player.DisplayName -- или player.Name
+	end
+
+	if imageLabel then
+		-- Получаем аватарку игрока
+		local success, content = pcall(function()
+			return Players:GetUserThumbnailAsync(
+				player.UserId,
+				Enum.ThumbnailType.HeadShot,           -- или AvatarBust / AvatarThumbnail
+				Enum.ThumbnailSize.Size150x150
+			)
+		end)
+
+		if success and content then
+			imageLabel.Image = content
+		else
+			imageLabel.Image = "rbxassetid://0" -- запасной вариант
+		end
+	end
+end
+
+-- Очистка BillboardGui при освобождении базы
+local function clearBaseBillboard(base)
+	local avatar = base:FindFirstChild("Avatar")
+	if not avatar then return end
+
+	local billboard = avatar:FindFirstChildOfClass("BillboardGui")
+	if not billboard then return end
+
+	local imageLabel = billboard:FindFirstChild("ImageLabel")
+	local textLabel = billboard:FindFirstChild("TextLabel")
+
+	if textLabel then
+		textLabel.Text = ""
+	end
+	if imageLabel then
+		imageLabel.Image = ""
+	end
+end
+
+-- Назначение игрока на базу
+local function assignPlayerToBase(player)
+	local base, baseName = getFreeBase()
+
+	if not base then
+		warn("Нет свободных баз для игрока", player.Name)
+		-- Можно кикнуть или отправить в очередь
+		player:Kick("Сервер заполнен (6/6)")
+		return
+	end
+
+	occupiedBases[baseName] = player
+
+	-- Обновляем Billboard
+	updateBaseBillboard(base, player)
+
+	-- Можно сохранить владельца в атрибут базы (удобно потом)
+	base:SetAttribute("OwnerUserId", player.UserId)
+	base:SetAttribute("OwnerName", player.Name)
+
+	-- Телепорт игрока на базу (если нужно)
+	-- local spawn = base:FindFirstChild("Spawn") or base:FindFirstChild("Avatar")
+	-- if spawn and player.Character and player.Character:FindFirstChild("HumanoidRootPart") then
+	-- 	player.Character.HumanoidRootPart.CFrame = spawn.CFrame + Vector3.new(0, 3, 0)
+	-- end
+
+	print(player.Name, "получил базу", baseName)
+end
+
+-- Освобождение базы
+local function freeBase(player)
+	for baseName, owner in pairs(occupiedBases) do
+		if owner == player then
+			occupiedBases[baseName] = nil
+
+			local base = BASES_FOLDER:FindFirstChild(baseName)
+			if base then
+				clearBaseBillboard(base)
+				base:SetAttribute("OwnerUserId", nil)
+				base:SetAttribute("OwnerName", nil)
+			end
+
+			print(player.Name, "освободил базу", baseName)
+			break
+		end
+	end
+end
+
+-- Подключения
+Players.PlayerAdded:Connect(function(player)
+	-- Ждём, пока персонаж появится (на всякий случай)
+	player.CharacterAdded:Wait()
+	task.wait(0.5) -- небольшая задержка, чтобы всё точно прогрузилось
+
+	assignPlayerToBase(player)
+end)
+
+Players.PlayerRemoving:Connect(function(player)
+	freeBase(player)
+end)
+
+-- На случай, если скрипт перезапустился, а игроки уже есть
+for _, player in ipairs(Players:GetPlayers()) do
+	task.spawn(function()
+		assignPlayerToBase(player)
+	end)
+end
