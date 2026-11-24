@@ -1,0 +1,342 @@
+local Players = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local ServerStorage = game:GetService("ServerStorage")
+local RunService = game:GetService("RunService")
+local DataStoreService = game:GetService("DataStoreService")
+
+local TreadmillConfig = require(ReplicatedStorage.Modules.TreadmillConfig)
+
+--------------------------------------------------
+-- НАСТРОЙКИ
+--------------------------------------------------
+local DATA_VERSION = 1          -- изменить число -> сбросятся данные ВСЕХ игроков
+local RESET_ON_JOIN = false     -- true -> данные не загружаются при входе (для тестов)
+local ACTIVATE_RADIUS = 3.5     -- горизонтальный радиус от центра Osnova, когда игрок "наступил"
+local ACTIVATE_HEIGHT = 8       -- максимальная разница по высоте
+local AUTOSAVE_INTERVAL = 60
+
+local ANIM_SPEED_MIN = 0.8      -- скорость анимации при Speed = 0
+local ANIM_SPEED_MAX = 2.5      -- максимальная скорость анимации
+local ANIM_SPEED_CAP_EXP = 9    -- при Speed = 10^9 (1B) анимация достигает максимума
+
+local store = DataStoreService:GetDataStore("PlayerData_v" .. DATA_VERSION)
+
+local playerData = {}
+local activeRunners = {}
+local mustLeave = {}     -- игрок должен отойти от дорожки перед повторным захватом
+local osnovaCache = {}
+
+local function defaultData()
+	return {
+		Speed = 0,
+		Rebirths = 0,
+		CurrentTreadmill = "treadmill base",
+		CurrentAura = "None",
+	}
+end
+
+--------------------------------------------------
+-- Сохранение / загрузка
+--------------------------------------------------
+local function saveData(player)
+	local data = playerData[player.UserId]
+	if not data then return end
+	local ok, err = pcall(function()
+		store:SetAsync("Player_" .. player.UserId, data)
+	end)
+	if not ok then
+		warn("Ошибка сохранения", player.Name, err)
+	end
+end
+
+local function loadData(player)
+	local data = defaultData()
+
+	if not RESET_ON_JOIN then
+		local ok, result = pcall(function()
+			return store:GetAsync("Player_" .. player.UserId)
+		end)
+		if ok and type(result) == "table" then
+			for k, v in pairs(result) do
+				data[k] = v
+			end
+		elseif not ok then
+			warn("Ошибка загрузки", player.Name, result)
+		end
+	end
+
+	playerData[player.UserId] = data
+
+	local folder = Instance.new("Folder")
+	folder.Name = "leaderstats"
+	folder.Parent = player
+
+	local speed = Instance.new("NumberValue")
+	speed.Name = "Speed"
+	speed.Value = data.Speed
+	speed.Parent = folder
+end
+
+--------------------------------------------------
+-- Поиск дорожки
+--------------------------------------------------
+local function findPlayerBase(player)
+	for _, base in ipairs(workspace:GetChildren()) do
+		if base.Name:match("^base%d+$") and base:GetAttribute("OwnerUserId") == player.UserId then
+			return base
+		end
+	end
+end
+
+local function getTreadmillOf(osnova, base)
+	local p = osnova.Parent
+	while p and p ~= base do
+		local n = p.Name:lower()
+		if n:find("tread") or n:find("trademill") then
+			return p
+		end
+		p = p.Parent
+	end
+end
+
+-- список всех Osnova на базе игрока (кэшируется на 3 сек)
+local function getOsnovas(player)
+	local cache = osnovaCache[player]
+	if cache and os.clock() - cache.time < 3 then
+		return cache.list
+	end
+
+	local list = {}
+	local base = findPlayerBase(player)
+	if base then
+		for _, obj in ipairs(base:GetDescendants()) do
+			if obj:IsA("BasePart") and obj.Name:lower() == "osnova" then
+				local treadmill = getTreadmillOf(obj, base)
+				if treadmill then
+					table.insert(list, { osnova = obj, treadmill = treadmill })
+				end
+			end
+		end
+	end
+
+	osnovaCache[player] = { time = os.clock(), list = list }
+	return list
+end
+
+local function horizontalDist(a, b)
+	local d = a - b
+	return Vector3.new(d.X, 0, d.Z).Magnitude
+end
+
+-- ближайшая дорожка: osnova, treadmill, горизонтальная дистанция, вертикальная дистанция
+local function findNearest(player, hrp)
+	local bestO, bestT, bestH, bestV = nil, nil, math.huge, math.huge
+	for _, entry in ipairs(getOsnovas(player)) do
+		local o = entry.osnova
+		if o.Parent then
+			local h = horizontalDist(hrp.Position, o.Position)
+			if h < bestH then
+				bestO, bestT, bestH = o, entry.treadmill, h
+				bestV = math.abs(hrp.Position.Y - o.Position.Y)
+			end
+		end
+	end
+	return bestO, bestT, bestH, bestV
+end
+
+--------------------------------------------------
+-- Бег
+--------------------------------------------------
+local function getAnimSpeed(speed)
+	local t = math.clamp(math.log10(speed + 1) / ANIM_SPEED_CAP_EXP, 0, 1)
+	return ANIM_SPEED_MIN + (ANIM_SPEED_MAX - ANIM_SPEED_MIN) * t
+end
+
+local function stopRunning(player, requireLeave)
+	local run = activeRunners[player]
+	if not run then return end
+	if run.connection then run.connection:Disconnect() end
+	if run.track then run.track:Stop() end
+	activeRunners[player] = nil
+	if requireLeave then
+		mustLeave[player] = true
+	end
+end
+
+local function startRunning(player, treadmill, osnova)
+	if activeRunners[player] then return end
+
+	local character = player.Character
+	local humanoid = character and character:FindFirstChildOfClass("Humanoid")
+	if not humanoid then return end
+
+	local animator = humanoid:FindFirstChildOfClass("Animator") or Instance.new("Animator", humanoid)
+	local anim = Instance.new("Animation")
+	anim.AnimationId = "rbxassetid://507767714" -- стандартный бег Roblox
+	local track = animator:LoadAnimation(anim)
+	track.Looped = true
+	track.Priority = Enum.AnimationPriority.Action
+
+	local data = playerData[player.UserId]
+	if data then
+		data.CurrentTreadmill = treadmill.Name:lower()
+	end
+
+	track:Play(0.1, 1, data and getAnimSpeed(data.Speed) or ANIM_SPEED_MIN)
+
+	local run = { track = track }
+	activeRunners[player] = run
+	local animTimer = 0
+
+	-- если игрок ещё держит кнопку движения при заходе, выход по движению включится после того, как он её отпустит
+	local needRelease = humanoid.MoveDirection.Magnitude > 0
+
+	run.connection = RunService.Heartbeat:Connect(function(dt)
+		local hrp = character:FindFirstChild("HumanoidRootPart")
+		if not player.Parent or not hrp or humanoid.Health <= 0 or not osnova.Parent then
+			stopRunning(player, true)
+			return
+		end
+
+		local moving = humanoid.MoveDirection.Magnitude > 0
+		if not moving then
+			needRelease = false
+		end
+
+		-- сойти: прыжок или (после отпускания кнопки) движение
+		if humanoid.Jump or (moving and not needRelease) then
+			stopRunning(player, true)
+			return
+		end
+
+		-- центр дорожки
+		local height = osnova.Size.Y / 2 + humanoid.HipHeight + hrp.Size.Y / 2
+		hrp.CFrame = CFrame.new(osnova.Position + Vector3.new(0, height, 0)) * hrp.CFrame.Rotation
+		hrp.AssemblyLinearVelocity = Vector3.zero
+
+		local d = playerData[player.UserId]
+		if d then
+			d.Speed += TreadmillConfig.GetSpeedPerSecond(d) * dt
+			local ls = player:FindFirstChild("leaderstats")
+			if ls and ls:FindFirstChild("Speed") then
+				ls.Speed.Value = d.Speed
+			end
+
+			-- обновляем скорость анимации 4 раза в секунду
+			animTimer += dt
+			if animTimer >= 0.25 then
+				animTimer = 0
+				track:AdjustSpeed(getAnimSpeed(d.Speed))
+			end
+		end
+	end)
+end
+
+--------------------------------------------------
+-- Сброс данных (вызывается из AdminCommands)
+--------------------------------------------------
+local function resetUser(userId)
+	local target = Players:GetPlayerByUserId(userId)
+
+	if target then
+		-- игрок онлайн: сбрасываем в памяти и перезаписываем сохранение
+		stopRunning(target, true)
+		playerData[userId] = defaultData()
+		local ls = target:FindFirstChild("leaderstats")
+		if ls and ls:FindFirstChild("Speed") then
+			ls.Speed.Value = 0
+		end
+		saveData(target)
+		return true, "онлайн"
+	else
+		-- игрок оффлайн: удаляем запись
+		local ok, err = pcall(function()
+			store:RemoveAsync("Player_" .. userId)
+		end)
+		if not ok then
+			warn("Ошибка сброса", userId, err)
+			return false, tostring(err)
+		end
+		return true, "оффлайн"
+	end
+end
+
+local resetFunction = Instance.new("BindableFunction")
+resetFunction.Name = "ResetPlayerData"
+resetFunction.OnInvoke = resetUser
+resetFunction.Parent = ServerStorage
+
+--------------------------------------------------
+-- Игроки
+--------------------------------------------------
+local function onPlayerAdded(player)
+	loadData(player)
+
+	player.CharacterRemoving:Connect(function()
+		stopRunning(player, false)
+		mustLeave[player] = nil
+	end)
+end
+
+Players.PlayerAdded:Connect(onPlayerAdded)
+for _, p in ipairs(Players:GetPlayers()) do
+	task.spawn(onPlayerAdded, p)
+end
+
+Players.PlayerRemoving:Connect(function(player)
+	stopRunning(player, false)
+	saveData(player)
+	playerData[player.UserId] = nil
+	mustLeave[player] = nil
+	osnovaCache[player] = nil
+end)
+
+game:BindToClose(function()
+	for _, p in ipairs(Players:GetPlayers()) do
+		saveData(p)
+	end
+end)
+
+task.spawn(function()
+	while true do
+		task.wait(AUTOSAVE_INTERVAL)
+		for _, p in ipairs(Players:GetPlayers()) do
+			saveData(p)
+		end
+	end
+end)
+
+-- Проверка "наступил ли игрок на дорожку"
+task.spawn(function()
+	local warned = {}
+	while true do
+		task.wait(0.1)
+		for _, player in ipairs(Players:GetPlayers()) do
+			if activeRunners[player] or not playerData[player.UserId] then continue end
+
+			local char = player.Character
+			local hrp = char and char:FindFirstChild("HumanoidRootPart")
+			if not hrp then continue end
+
+			if not findPlayerBase(player) then
+				if not warned[player] then
+					warned[player] = true
+					warn("База игрока не найдена (нет атрибута OwnerUserId):", player.Name)
+				end
+				continue
+			end
+
+			local osnova, treadmill, hDist, vDist = findNearest(player, hrp)
+			if not osnova then continue end
+
+			if mustLeave[player] then
+				-- повторный захват только после того, как игрок отошёл от дорожки
+				if hDist > ACTIVATE_RADIUS + 1.5 then
+					mustLeave[player] = nil
+				end
+			elseif hDist <= ACTIVATE_RADIUS and vDist <= ACTIVATE_HEIGHT then
+				startRunning(player, treadmill, osnova)
+			end
+		end
+	end
+end)
