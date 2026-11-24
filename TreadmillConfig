@@ -1,0 +1,39 @@
+local TreadmillConfig = {}
+
+TreadmillConfig.BaseSpeedPerSecond = 1
+
+-- Ключи в нижнем регистре. Название папки/модели дорожки ищется по вхождению
+TreadmillConfig.TreadmillMultipliers = {
+	["treadmill base"] = 1,
+	["treadmill_rare"] = 1.5,
+	["treadmill_epic"] = 2.5,
+	["treadmill_legendary"] = 4,
+}
+
+TreadmillConfig.AuraMultipliers = {
+	["None"] = 1,
+}
+
+TreadmillConfig.RebirthMultiplierPerRebirth = 0.25 -- +25% за ребёрт
+
+function TreadmillConfig.GetTreadmillMultiplier(name)
+	name = string.lower(name or "")
+	if TreadmillConfig.TreadmillMultipliers[name] then
+		return TreadmillConfig.TreadmillMultipliers[name]
+	end
+	for key, mult in pairs(TreadmillConfig.TreadmillMultipliers) do
+		if name:find(key, 1, true) then
+			return mult
+		end
+	end
+	return 1
+end
+
+function TreadmillConfig.GetSpeedPerSecond(playerData)
+	local treadmillMult = TreadmillConfig.GetTreadmillMultiplier(playerData.CurrentTreadmill)
+	local auraMult = TreadmillConfig.AuraMultipliers[playerData.CurrentAura] or 1
+	local rebirthMult = 1 + (playerData.Rebirths * TreadmillConfig.RebirthMultiplierPerRebirth)
+	return TreadmillConfig.BaseSpeedPerSecond * treadmillMult * auraMult * rebirthMult
+end
+
+return TreadmillConfig
