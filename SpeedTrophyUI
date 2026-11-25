@@ -1,0 +1,302 @@
+-- LocalScript: StarterGui → SpeedTrophyUI
+
+local Players = game:GetService("Players")
+local TweenService = game:GetService("TweenService")
+
+local player = Players.LocalPlayer
+local playerGui = player:WaitForChild("PlayerGui")
+
+--------------------------------------------------
+-- НАСТРОЙКИ
+--------------------------------------------------
+local CONFIG = {
+	-- Зона появления (Scale)
+	SpawnMin = UDim2.new(0.591, 0, 0.696, 0), -- левый нижний
+	SpawnMax = UDim2.new(0.806, 0, 0.175, 0), -- правый верхний
+
+	-- Анимация
+	AppearTime  = 0.15,
+	FlyTime     = 0.55,
+	FadeTime    = 0.15,
+	FlyDistance = 0.05,
+
+	-- Попапы
+	MinGainToShow   = 1,
+	MaxPopupsAtOnce = 6,
+
+	-- Размер «хитбокса» попапа в Scale (чтобы не накладывались)
+	PopupWidth  = 0.14,
+	PopupHeight = 0.06,
+	MinDistance = 0.07, -- минимальная дистанция между центрами
+}
+
+--------------------------------------------------
+-- Поиск
+--------------------------------------------------
+local function findDeep(name)
+	return playerGui:FindFirstChild(name, true)
+end
+
+local speedGUI   = findDeep("SpeedGUI")
+local trophyGUI  = findDeep("TrophyGUI")
+local plusSpeed  = findDeep("PlusSpeed")
+local plusTrophy = findDeep("PlusTrophy")
+
+local speedLabel  = speedGUI and speedGUI:FindFirstChild("TextLabel", true)
+local trophyLabel = trophyGUI and trophyGUI:FindFirstChild("TextLabel", true)
+
+--------------------------------------------------
+-- Форматирование
+--------------------------------------------------
+local function formatNumber(n)
+	n = math.floor(n + 0.5)
+	if n >= 1e12 then return string.format("%.2fT", n / 1e12)
+	elseif n >= 1e9 then return string.format("%.2fB", n / 1e9)
+	elseif n >= 1e6 then return string.format("%.2fM", n / 1e6)
+	elseif n >= 1e3 then return string.format("%.2fK", n / 1e3)
+	else return tostring(n) end
+end
+
+--------------------------------------------------
+-- Активные попапы (для проверки пересечений)
+--------------------------------------------------
+local activePopups = {} -- { clone, x, y }
+
+local function removeActive(clone)
+	for i = #activePopups, 1, -1 do
+		if activePopups[i].clone == clone then
+			table.remove(activePopups, i)
+			break
+		end
+	end
+end
+
+local function isTooClose(x, y)
+	for _, p in ipairs(activePopups) do
+		local dx = x - p.x
+		local dy = y - p.y
+		if math.sqrt(dx * dx + dy * dy) < CONFIG.MinDistance then
+			return true
+		end
+	end
+	return false
+end
+
+local function getFreePosition()
+	local minX = math.min(CONFIG.SpawnMin.X.Scale, CONFIG.SpawnMax.X.Scale)
+	local maxX = math.max(CONFIG.SpawnMin.X.Scale, CONFIG.SpawnMax.X.Scale)
+	local minY = math.min(CONFIG.SpawnMin.Y.Scale, CONFIG.SpawnMax.Y.Scale)
+	local maxY = math.max(CONFIG.SpawnMin.Y.Scale, CONFIG.SpawnMax.Y.Scale)
+
+	-- Пробуем найти свободное место
+	for _ = 1, 20 do
+		local x = minX + math.random() * (maxX - minX)
+		local y = minY + math.random() * (maxY - minY)
+		if not isTooClose(x, y) then
+			return x, y
+		end
+	end
+
+	-- Если не нашли — ставим со смещением от последнего
+	if #activePopups > 0 then
+		local last = activePopups[#activePopups]
+		local x = math.clamp(last.x + CONFIG.MinDistance * 0.9, minX, maxX)
+		local y = math.clamp(last.y - CONFIG.MinDistance * 0.6, minY, maxY)
+		return x, y
+	end
+
+	return minX + (maxX - minX) * 0.5, minY + (maxY - minY) * 0.5
+end
+
+--------------------------------------------------
+-- Попап
+--------------------------------------------------
+local function showPopup(template, text)
+	if not template then return end
+	if #activePopups >= CONFIG.MaxPopupsAtOnce then return end
+
+	local clone = template:Clone()
+	clone.Name = "PopupClone"
+	clone.Visible = true
+	clone.ZIndex = 10
+	clone.BackgroundTransparency = 1
+	clone.Parent = template.Parent
+
+	-- Текст
+	local label = clone:FindFirstChild("TextLabel", true)
+	if label then
+		label.Text = text
+		label.Visible = true
+		label.TextTransparency = 1
+		label.TextStrokeTransparency = 1
+	end
+
+	-- Картинка — плавно через ImageTransparency (НЕ Visible)
+	local image = clone:FindFirstChildWhichIsA("ImageLabel", true)
+		or clone:FindFirstChildWhichIsA("ImageButton", true)
+
+	if image then
+		image.Visible = true
+		image.ImageTransparency = 1 -- стартуем невидимой, потом плавно проявляем
+	end
+
+	local randX, randY = getFreePosition()
+	clone.Position = UDim2.new(randX, 0, randY, 0)
+	clone.Size = template.Size
+
+	table.insert(activePopups, { clone = clone, x = randX, y = randY })
+
+	-- 1. Появление: текст + картинка
+	local appearInfo = TweenInfo.new(CONFIG.AppearTime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+	if label then
+		TweenService:Create(label, appearInfo, {
+			TextTransparency = 0,
+			TextStrokeTransparency = 0.4
+		}):Play()
+	end
+
+	if image then
+		TweenService:Create(image, appearInfo, {
+			ImageTransparency = 0
+		}):Play()
+	end
+
+	-- 2. Полёт вверх
+	task.delay(CONFIG.AppearTime, function()
+		if not clone.Parent then
+			removeActive(clone)
+			return
+		end
+
+		local targetY = randY - CONFIG.FlyDistance
+		local flyInfo = TweenInfo.new(CONFIG.FlyTime, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
+
+		TweenService:Create(clone, flyInfo, {
+			Position = UDim2.new(randX, 0, targetY, 0)
+		}):Play()
+
+		-- Обновляем позицию в списке (чтобы новые не лезли на улетающий)
+		for _, p in ipairs(activePopups) do
+			if p.clone == clone then
+				p.y = targetY
+				break
+			end
+		end
+
+		-- 3. Исчезновение: текст и картинка плавно
+		task.delay(math.max(0, CONFIG.FlyTime - CONFIG.FadeTime), function()
+			if not clone.Parent then return end
+
+			local fadeInfo = TweenInfo.new(CONFIG.FadeTime, Enum.EasingStyle.Quad, Enum.EasingDirection.In)
+
+			if label then
+				TweenService:Create(label, fadeInfo, {
+					TextTransparency = 1,
+					TextStrokeTransparency = 1
+				}):Play()
+			end
+
+			if image then
+				TweenService:Create(image, fadeInfo, {
+					ImageTransparency = 1
+				}):Play()
+			end
+		end)
+
+		task.delay(CONFIG.FlyTime + 0.05, function()
+			removeActive(clone)
+			if clone and clone.Parent then
+				clone:Destroy()
+			end
+		end)
+	end)
+end
+
+--------------------------------------------------
+-- Прирост
+--------------------------------------------------
+local lastSpeed  = 0
+local lastTrophy = 0
+local pendingSpeedGain  = 0
+local pendingTrophyGain = 0
+
+local function updateLabels()
+	local ls = player:FindFirstChild("leaderstats")
+	if not ls then return end
+
+	local speedVal = ls:FindFirstChild("Speed")
+	if speedVal and speedLabel then
+		local v = speedVal.Value
+		speedLabel.Text = formatNumber(v)
+
+		local gained = v - lastSpeed
+		if gained > 0 then
+			pendingSpeedGain += gained
+		end
+		lastSpeed = v
+
+		if pendingSpeedGain >= CONFIG.MinGainToShow then
+			local showAmount = pendingSpeedGain
+			pendingSpeedGain = 0
+			showPopup(plusSpeed, "+" .. formatNumber(showAmount))
+		end
+	end
+
+	local trophyVal = ls:FindFirstChild("Trophy") or ls:FindFirstChild("Trophies")
+	if trophyVal and trophyLabel then
+		local v = trophyVal.Value
+		trophyLabel.Text = formatNumber(v)
+
+		local gained = v - lastTrophy
+		if gained > 0 then
+			pendingTrophyGain += gained
+		end
+		lastTrophy = v
+
+		if pendingTrophyGain >= 1 then
+			local showAmount = pendingTrophyGain
+			pendingTrophyGain = 0
+			showPopup(plusTrophy, "+" .. formatNumber(showAmount) .. " Trophy")
+		end
+	end
+end
+
+--------------------------------------------------
+-- Подключение
+--------------------------------------------------
+local function connectLeaderstats()
+	local ls = player:WaitForChild("leaderstats", 15)
+	if not ls then return end
+
+	local speedVal = ls:WaitForChild("Speed", 5)
+	if speedVal then
+		lastSpeed = speedVal.Value
+		speedVal:GetPropertyChangedSignal("Value"):Connect(updateLabels)
+	end
+
+	local trophyVal = ls:FindFirstChild("Trophy") or ls:FindFirstChild("Trophies")
+	if trophyVal then
+		lastTrophy = trophyVal.Value
+		trophyVal:GetPropertyChangedSignal("Value"):Connect(updateLabels)
+	end
+
+	updateLabels()
+end
+
+if player:FindFirstChild("leaderstats") then
+	connectLeaderstats()
+else
+	player.ChildAdded:Connect(function(child)
+		if child.Name == "leaderstats" then
+			connectLeaderstats()
+		end
+	end)
+end
+
+task.spawn(function()
+	while true do
+		task.wait(0.5)
+		updateLabels()
+	end
+end)
