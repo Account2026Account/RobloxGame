@@ -1,0 +1,83 @@
+-- ServerScriptService → CharacterSpeedSystem
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+
+--------------------------------------------------
+-- НАСТРОЙКИ
+--------------------------------------------------
+local BASE_WALKSPEED = 16          -- обычная скорость вне зоны
+local MAX_WALKSPEED  = 200         -- максимум WalkSpeed
+local SPEED_DIVISOR  = 50          -- Speed / SPEED_DIVISOR = бонус к WalkSpeed
+-- Пример: Speed = 500 → бонус 10 → WalkSpeed = 26
+
+local ZONES_FOLDER_NAME = "Zones"  -- папка в Workspace
+
+--------------------------------------------------
+local zonesFolder = workspace:FindFirstChild(ZONES_FOLDER_NAME)
+
+local function isInAnyZone(hrp)
+	if not zonesFolder then return false end
+
+	for _, zone in ipairs(zonesFolder:GetChildren()) do
+		if zone:IsA("BasePart") then
+			-- Простая проверка: точка внутри bounding box зоны
+			local rel = zone.CFrame:PointToObjectSpace(hrp.Position)
+			local size = zone.Size / 2
+			if math.abs(rel.X) <= size.X and
+				math.abs(rel.Y) <= size.Y and
+				math.abs(rel.Z) <= size.Z then
+				return true
+			end
+		end
+	end
+	return false
+end
+
+local function getDesiredWalkSpeed(player)
+	local ls = player:FindFirstChild("leaderstats")
+	local speedVal = ls and ls:FindFirstChild("Speed")
+	local speed = speedVal and speedVal.Value or 0
+
+	local bonus = speed / SPEED_DIVISOR
+	return math.clamp(BASE_WALKSPEED + bonus, BASE_WALKSPEED, MAX_WALKSPEED)
+end
+
+local function updatePlayer(player)
+	local char = player.Character
+	if not char then return end
+
+	local humanoid = char:FindFirstChildOfClass("Humanoid")
+	local hrp = char:FindFirstChild("HumanoidRootPart")
+	if not humanoid or not hrp then return end
+
+	if isInAnyZone(hrp) then
+		humanoid.WalkSpeed = getDesiredWalkSpeed(player)
+	else
+		humanoid.WalkSpeed = BASE_WALKSPEED
+	end
+end
+
+-- Обновляем всех игроков
+RunService.Heartbeat:Connect(function()
+	for _, player in ipairs(Players:GetPlayers()) do
+		updatePlayer(player)
+	end
+end)
+
+-- При появлении персонажа сразу ставим базовую скорость
+Players.PlayerAdded:Connect(function(player)
+	player.CharacterAdded:Connect(function(char)
+		local humanoid = char:WaitForChild("Humanoid")
+		humanoid.WalkSpeed = BASE_WALKSPEED
+	end)
+end)
+
+for _, player in ipairs(Players:GetPlayers()) do
+	if player.Character then
+		local humanoid = player.Character:FindFirstChildOfClass("Humanoid")
+		if humanoid then
+			humanoid.WalkSpeed = BASE_WALKSPEED
+		end
+	end
+end
